@@ -1,0 +1,6 @@
+{
+  "name": "PulseQueue ER — Hospital Emergency & Priority Management",
+  "description": "Hospital Emergency and Patient Priority Management System powered by Min-Heap Priority Queue, FIFO Queue, Hash Map, and Doubly Linked List with SQLite persistence.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
