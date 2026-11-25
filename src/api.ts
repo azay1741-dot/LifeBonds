@@ -1,4 +1,12 @@
-import { HospitalSnapshot, Patient, PriorityLevel, TreatmentEvent, Vitals } from './types';
+import {
+  AiChatMode,
+  GroundingSource,
+  HospitalSnapshot,
+  Patient,
+  PriorityLevel,
+  TreatmentEvent,
+  Vitals,
+} from './types';
 
 export interface RegisterPatientPayload {
   name: string;
@@ -11,10 +19,32 @@ export interface RegisterPatientPayload {
   vitals: Vitals;
 }
 
+type TokenProvider = (() => Promise<string | null>) | null;
+let authTokenProvider: TokenProvider = null;
+
+export function setAuthTokenProvider(provider: TokenProvider): void {
+  authTokenProvider = provider;
+}
+
+async function buildAuthHeaders(extra?: HeadersInit): Promise<HeadersInit> {
+  const token = authTokenProvider ? await authTokenProvider() : null;
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  };
+  if (token) {
+    headers.Authorization = `Bearer ${token}`;
+  }
+  if (extra && typeof extra === 'object' && !Array.isArray(extra)) {
+    Object.assign(headers, extra);
+  }
+  return headers;
+}
+
 async function requestJson<T>(url: string, options?: RequestInit): Promise<T> {
+  const headers = await buildAuthHeaders(options?.headers);
   const res = await fetch(url, {
-    headers: { 'Content-Type': 'application/json' },
     ...options,
+    headers,
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
@@ -75,6 +105,17 @@ export function completeTreatmentApi(
   });
 }
 
+export function transferPatientApi(
+  patientId: string,
+  destination: string,
+  reason: string
+): Promise<{ patient: Patient; snapshot: HospitalSnapshot }> {
+  return requestJson(`/api/patients/${encodeURIComponent(patientId)}/transfer`, {
+    method: 'POST',
+    body: JSON.stringify({ destination, reason }),
+  });
+}
+
 export function toggleDoctorStatusApi(
   doctorId: string,
   status: 'Available' | 'Off-Duty'
@@ -104,4 +145,54 @@ export function fetchPatientTimelineApi(
 
 export function resetDemoApi(): Promise<{ snapshot: HospitalSnapshot }> {
   return requestJson('/api/reset-demo', { method: 'POST' });
+}
+
+export async function downloadCsvReportApi(): Promise<void> {
+  const token = authTokenProvider ? await authTokenProvider() : null;
+  const res = await fetch('/api/reports/export', {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  });
+  if (!res.ok) {
+    throw new Error(`Export failed (${res.status})`);
+  }
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'lifebonds-er-report.csv';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+export async function downloadQueueSnapshotCsvApi(): Promise<void> {
+  const token = authTokenProvider ? await authTokenProvider() : null;
+  const res = await fetch('/api/reports/queue-export', {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  });
+  if (!res.ok) {
+    throw new Error(`Queue snapshot export failed (${res.status})`);
+  }
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'lifebonds-queue-snapshot.csv';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+export function sendAiChatApi(payload: {
+  mode: AiChatMode;
+  message: string;
+  history: Array<{ role: 'user' | 'model'; text: string }>;
+  latLng?: { latitude: number; longitude: number } | null;
+}): Promise<{ text: string; modelUsed: string; sources: GroundingSource[] }> {
+  return requestJson('/api/ai/chat', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
 }

@@ -1,0 +1,185 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global default-deny safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isOwner(userId) {
+      return isVerifiedUser() && request.auth.uid == userId;
+    }
+
+    function userExists(userId) {
+      return exists(/databases/$(database)/documents/users/$(userId));
+    }
+
+    function isValidStaffProfile(data, userId) {
+      return data.uid is string
+        && data.uid == userId
+        && data.uid == request.auth.uid
+        && isValidId(data.uid)
+        && data.email is string
+        && data.email.size() >= 3
+        && data.email.size() <= 200
+        && data.displayName is string
+        && data.displayName.size() >= 1
+        && data.displayName.size() <= 100
+        && data.departmentUnit is string
+        && data.departmentUnit.size() >= 2
+        && data.departmentUnit.size() <= 80
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidReferralBookmark(data, userId, facilityId) {
+      return data.ownerId is string
+        && data.ownerId == userId
+        && data.ownerId == request.auth.uid
+        && isValidId(data.ownerId)
+        && data.facilityId is string
+        && data.facilityId == facilityId
+        && isValidId(data.facilityId)
+        && data.name is string
+        && data.name.size() >= 2
+        && data.name.size() <= 160
+        && data.category is string
+        && data.category in ['Pharmacy', 'Outpatient Clinic', 'Diagnostics', 'Blood Bank', 'Rehab Center']
+        && data.address is string
+        && data.address.size() >= 2
+        && data.address.size() <= 300
+        && data.placeUri is string
+        && data.placeUri.size() >= 8
+        && data.placeUri.size() <= 500
+        && data.placeUri.matches('^https://.*')
+        && data.notes is string
+        && data.notes.size() <= 400
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidShiftNote(data, userId) {
+      return data.ownerId is string
+        && data.ownerId == userId
+        && data.ownerId == request.auth.uid
+        && isValidId(data.ownerId)
+        && data.title is string
+        && data.title.size() >= 2
+        && data.title.size() <= 120
+        && data.body is string
+        && data.body.size() >= 1
+        && data.body.size() <= 1000
+        && data.category is string
+        && data.category in ['Shift Handoff', 'Surge Protocol', 'DSA Observation', 'Equipment Check']
+        && data.pinned is bool
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    // Read-only single-document connectivity check endpoint
+    match /test/connection {
+      allow get: if isSignedIn();
+      allow list, write: if false;
+    }
+
+    // Staff profile documents (strict PII owner-only isolation)
+    match /users/{userId} {
+      allow get: if isValidId(userId) && isOwner(userId);
+      allow list, delete: if false;
+      allow create: if isVerifiedUser()
+        && isValidId(userId)
+        && isOwner(userId)
+        && incoming().keys().hasAll(['uid', 'email', 'displayName', 'departmentUnit', 'createdAt', 'updatedAt'])
+        && incoming().keys().hasOnly(['uid', 'email', 'displayName', 'departmentUnit', 'createdAt', 'updatedAt'])
+        && isValidStaffProfile(incoming(), userId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isVerifiedUser()
+        && isValidId(userId)
+        && isOwner(userId)
+        && isValidStaffProfile(incoming(), userId)
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'departmentUnit', 'email', 'updatedAt']);
+
+      // Saved non-PHI outpatient referral bookmarks
+      match /bookmarks/{facilityId} {
+        allow get: if isValidId(userId) && isValidId(facilityId) && isOwner(userId);
+        allow list: if isValidId(userId) && isOwner(userId) && existing().ownerId == request.auth.uid;
+        allow create: if isVerifiedUser()
+          && isValidId(userId)
+          && isValidId(facilityId)
+          && isOwner(userId)
+          && incoming().keys().hasAll(['ownerId', 'facilityId', 'name', 'category', 'address', 'placeUri', 'notes', 'createdAt', 'updatedAt'])
+          && incoming().keys().hasOnly(['ownerId', 'facilityId', 'name', 'category', 'address', 'placeUri', 'notes', 'createdAt', 'updatedAt'])
+          && isValidReferralBookmark(incoming(), userId, facilityId)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time
+          && userExists(userId);
+        allow update: if isVerifiedUser()
+          && isValidId(userId)
+          && isValidId(facilityId)
+          && isOwner(userId)
+          && isValidReferralBookmark(incoming(), userId, facilityId)
+          && incoming().ownerId == existing().ownerId
+          && incoming().facilityId == existing().facilityId
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly(['notes', 'category', 'updatedAt'])
+          && userExists(userId);
+        allow delete: if isValidId(userId) && isValidId(facilityId) && isOwner(userId);
+      }
+
+      // Personal operational shift notes
+      match /triageNotes/{noteId} {
+        allow get: if isValidId(userId) && isValidId(noteId) && isOwner(userId);
+        allow list: if isValidId(userId) && isOwner(userId) && existing().ownerId == request.auth.uid;
+        allow create: if isVerifiedUser()
+          && isValidId(userId)
+          && isValidId(noteId)
+          && isOwner(userId)
+          && incoming().keys().hasAll(['ownerId', 'title', 'body', 'category', 'pinned', 'createdAt', 'updatedAt'])
+          && incoming().keys().hasOnly(['ownerId', 'title', 'body', 'category', 'pinned', 'createdAt', 'updatedAt'])
+          && isValidShiftNote(incoming(), userId)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time
+          && userExists(userId);
+        allow update: if isVerifiedUser()
+          && isValidId(userId)
+          && isValidId(noteId)
+          && isOwner(userId)
+          && isValidShiftNote(incoming(), userId)
+          && incoming().ownerId == existing().ownerId
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && (
+            incoming().diff(existing()).affectedKeys().hasOnly(['pinned', 'updatedAt']) ||
+            incoming().diff(existing()).affectedKeys().hasOnly(['title', 'body', 'category', 'pinned', 'updatedAt'])
+          )
+          && userExists(userId);
+        allow delete: if isValidId(userId) && isValidId(noteId) && isOwner(userId);
+      }
+    }
+  }
+}

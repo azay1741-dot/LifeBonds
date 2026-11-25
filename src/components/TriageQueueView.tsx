@@ -1,8 +1,9 @@
-import { ArrowUpDown, Clock, History, Search, Stethoscope, UserCheck } from 'lucide-react';
+import { ArrowRightLeft, ArrowUpDown, CheckCircle2, Clock, History, Printer, Search, Stethoscope, UserCheck, Volume2, VolumeX, X } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import { Doctor, HospitalSnapshot, Patient, PriorityLevel } from '../types';
 import {
   DoctorStatusText,
+  PatientStatusText,
   PriorityText,
   formatClock,
   formatMinutesSince,
@@ -11,9 +12,12 @@ import {
 interface TriageQueueViewProps {
   snapshot: HospitalSnapshot;
   busyAction: string | null;
+  audioAlertEnabled: boolean;
+  onToggleAudioAlert: () => void;
   onDispatchNext: (doctorId: string) => void;
   onOpenPriorityModal: (patient: Patient) => void;
   onOpenAssignModal: (patient: Patient) => void;
+  onOpenTransferModal: (patient: Patient) => void;
   onOpenTimeline: (patient: Patient) => void;
   onCompleteTreatment: (patientId: string, outcome: 'Discharged' | 'Transferred') => void;
   onOpenRegister: () => void;
@@ -22,9 +26,12 @@ interface TriageQueueViewProps {
 export function TriageQueueView({
   snapshot,
   busyAction,
+  audioAlertEnabled,
+  onToggleAudioAlert,
   onDispatchNext,
   onOpenPriorityModal,
   onOpenAssignModal,
+  onOpenTransferModal,
   onOpenTimeline,
   onCompleteTreatment,
   onOpenRegister,
@@ -55,6 +62,7 @@ export function TriageQueueView({
       if (!q) return true;
       return (
         p.name.toLowerCase().includes(q) ||
+        p.id.toLowerCase().includes(q) ||
         p.mrn.toLowerCase().includes(q) ||
         p.complaint.toLowerCase().includes(q)
       );
@@ -64,8 +72,48 @@ export function TriageQueueView({
   const totalWaiting = snapshot.summary.emergencyWaitingCount + snapshot.summary.standardWaitingCount;
   const availableDoctors = snapshot.doctors.filter((d) => d.status === 'Available');
 
+  const { activeEmergencyCount, activeStandardCount, emergencyPct, standardPct } = useMemo(() => {
+    let emergency = 0;
+    let standard = 0;
+    for (const p of snapshot.allPatients) {
+      if (p.status === 'Waiting' || p.status === 'In Treatment') {
+        if (p.priority <= 3) emergency += 1;
+        else standard += 1;
+      }
+    }
+    const total = emergency + standard;
+    if (total === 0) {
+      return { activeEmergencyCount: 0, activeStandardCount: 0, emergencyPct: 0, standardPct: 0 };
+    }
+    const ePct = Math.round((emergency / total) * 100);
+    return {
+      activeEmergencyCount: emergency,
+      activeStandardCount: standard,
+      emergencyPct: ePct,
+      standardPct: 100 - ePct,
+    };
+  }, [snapshot.allPatients]);
+
   return (
     <div className="space-y-6">
+      {/* Printer-friendly summary header (visible only when printing) */}
+      <div className="hidden print:flex items-baseline justify-between border-b border-slate-300 pb-3">
+        <div>
+          <h1 className="text-lg font-bold text-slate-900">Lifebonds — Triage Queue Summary</h1>
+          <p className="text-xs text-slate-600">
+            Active View: {queueTab === 'emergency' ? 'Emergency Min-Heap (P1–P3)' : 'Standard Walk-In FIFO (P4)'}
+            {queueTab === 'emergency' && priorityFilter !== 'all' ? ` · Filter: P${priorityFilter}` : ''}
+            {searchQuery.trim() ? ` · Search: "${searchQuery.trim()}"` : ''}
+            {' · '}
+            {displayedQueue.length} {displayedQueue.length === 1 ? 'patient' : 'patients'} listed
+          </p>
+        </div>
+        <div className="text-right text-xs text-slate-600 font-mono tabular-nums">
+          <div>Snapshot: {new Date(snapshot.serverTime).toLocaleString()}</div>
+          <div>Emergency/Standard Active: {activeEmergencyCount}/{activeStandardCount}</div>
+        </div>
+      </div>
+
       {/* 4-column operational KPI strip with hairline dividers */}
       <section
         aria-label="Emergency Department Metrics"
@@ -129,9 +177,9 @@ export function TriageQueueView({
       {/* Main Workspace Grid: Waiting Queues (Left) + Doctor Dispatch & Active Bays (Right) */}
       <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-start">
         {/* Waiting Queue Table */}
-        <section className="xl:col-span-8 bg-white border border-slate-200 rounded-lg overflow-hidden">
+        <section className="xl:col-span-8 print:col-span-12 bg-white border border-slate-200 rounded-lg overflow-hidden print:overflow-visible">
           <div className="px-5 py-4 border-b border-slate-200 flex flex-col gap-4">
-            <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex flex-wrap items-center justify-between gap-3 no-print">
               <div className="flex items-center gap-1 p-1 bg-slate-100 rounded-lg">
                 <button
                   type="button"
@@ -157,20 +205,108 @@ export function TriageQueueView({
                 </button>
               </div>
 
-              <div className="relative w-full sm:w-64">
-                <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
-                <input
-                  type="text"
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  placeholder="Search name, MRN, symptom..."
-                  className="w-full pl-9 pr-3 py-1.5 text-sm bg-slate-50 border border-slate-200 rounded-lg text-slate-900 placeholder:text-slate-400 focus:outline-none focus:border-teal-600 focus:bg-white"
-                />
+              <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
+                <div className="relative flex-1 sm:w-64">
+                  <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                  <input
+                    type="search"
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    aria-label="Filter patients by name or ID"
+                    placeholder="Search by name, ID, MRN..."
+                    className="w-full pl-9 pr-8 py-1.5 text-sm bg-slate-50 border border-slate-200 rounded-lg text-slate-900 placeholder:text-slate-400 focus:outline-none focus:border-teal-600 focus:bg-white"
+                  />
+                  {searchQuery && (
+                    <button
+                      type="button"
+                      onClick={() => setSearchQuery('')}
+                      aria-label="Clear patient search"
+                      className="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 text-slate-400 hover:text-slate-700 rounded cursor-pointer"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  onClick={onToggleAudioAlert}
+                  aria-pressed={audioAlertEnabled}
+                  title={
+                    audioAlertEnabled
+                      ? 'Critical arrival chime is active (click to mute)'
+                      : 'Critical arrival chime is muted (click to enable)'
+                  }
+                  className={`px-3 py-1.5 text-xs font-medium border rounded-lg transition-colors whitespace-nowrap shrink-0 inline-flex items-center gap-1.5 cursor-pointer ${
+                    audioAlertEnabled
+                      ? 'bg-teal-50 border-teal-200 text-teal-800 hover:bg-teal-100'
+                      : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50 hover:text-slate-900'
+                  }`}
+                >
+                  {audioAlertEnabled ? (
+                    <Volume2 className="w-3.5 h-3.5 text-teal-700" />
+                  ) : (
+                    <VolumeX className="w-3.5 h-3.5 text-slate-400" />
+                  )}
+                  <span>{audioAlertEnabled ? 'Critical Chime On' : 'Critical Chime Off'}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => window.print()}
+                  title="Print a clean summary of the current triage queue"
+                  className="px-3 py-1.5 text-xs font-medium text-slate-700 bg-white border border-slate-200 hover:bg-slate-50 rounded-lg transition-colors whitespace-nowrap shrink-0 inline-flex items-center gap-1.5 cursor-pointer"
+                >
+                  <Printer className="w-3.5 h-3.5 text-slate-500" />
+                  <span>Print Queue</span>
+                </button>
               </div>
             </div>
 
+            {/* Emergency vs Standard System Ratio Bar */}
+            <div className="bg-slate-50/80 border border-slate-200/80 rounded-lg px-3.5 py-2.5 space-y-2">
+              <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                <span className="font-medium text-slate-700">
+                  Active System Ratio (Emergency vs. Standard)
+                </span>
+                <div className="flex flex-wrap items-center gap-3 font-mono tabular-nums text-[11px]">
+                  <span className="inline-flex items-center gap-1.5 text-red-700 font-semibold">
+                    <span className="h-2 w-2 rounded-xs bg-red-600 shrink-0" aria-hidden="true" />
+                    Emergency {activeEmergencyCount} ({emergencyPct}%)
+                  </span>
+                  <span className="inline-flex items-center gap-1.5 text-teal-800 font-semibold">
+                    <span className="h-2 w-2 rounded-xs bg-teal-600 shrink-0" aria-hidden="true" />
+                    Standard {activeStandardCount} ({standardPct}%)
+                  </span>
+                </div>
+              </div>
+              <svg
+                className="w-full h-2.5 rounded-full bg-slate-200 overflow-hidden block"
+                role="img"
+                aria-label={`Emergency to standard patient ratio: ${activeEmergencyCount} emergency (${emergencyPct}%) vs ${activeStandardCount} standard (${standardPct}%)`}
+                preserveAspectRatio="none"
+              >
+                {activeEmergencyCount + activeStandardCount > 0 ? (
+                  <>
+                    {emergencyPct > 0 && (
+                      <rect x="0" y="0" width={`${emergencyPct}%`} height="100%" fill="#dc2626" />
+                    )}
+                    {standardPct > 0 && (
+                      <rect
+                        x={`${emergencyPct}%`}
+                        y="0"
+                        width={`${standardPct}%`}
+                        height="100%"
+                        fill="#0d9488"
+                      />
+                    )}
+                  </>
+                ) : (
+                  <rect x="0" y="0" width="100%" height="100%" fill="#e2e8f0" />
+                )}
+              </svg>
+            </div>
+
             {queueTab === 'emergency' && (
-              <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex flex-wrap items-center justify-between gap-3 no-print">
                 <div className="flex items-center gap-1 p-1 bg-slate-100 rounded-lg">
                   {(['all', 1, 2, 3] as const).map((lvl) => (
                     <button
@@ -197,25 +333,40 @@ export function TriageQueueView({
           {displayedQueue.length === 0 ? (
             <div className="px-6 py-14 text-center">
               <p className="text-sm font-medium text-slate-900">
-                {searchQuery
-                  ? 'No waiting patients match your search.'
+                {searchQuery.trim() || (queueTab === 'emergency' && priorityFilter !== 'all')
+                  ? 'No waiting patients match the active filter.'
                   : queueTab === 'emergency'
                     ? 'Emergency Min-Heap is currently clear.'
                     : 'Standard Walk-In FIFO queue is empty.'}
               </p>
               <p className="mt-1 text-xs text-slate-500">
-                Register an incoming patient to observe real-time priority scheduling.
+                {searchQuery.trim() || (queueTab === 'emergency' && priorityFilter !== 'all')
+                  ? 'Adjust your search term or reset the priority filter to view all queued patients.'
+                  : 'Register an incoming patient to observe real-time priority scheduling.'}
               </p>
-              <button
-                type="button"
-                onClick={onOpenRegister}
-                className="mt-4 px-4 py-2 text-xs font-medium text-white bg-teal-700 hover:bg-teal-800 rounded-lg transition-colors whitespace-nowrap cursor-pointer"
-              >
-                Register Patient
-              </button>
+              {searchQuery.trim() || (queueTab === 'emergency' && priorityFilter !== 'all') ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSearchQuery('');
+                    setPriorityFilter('all');
+                  }}
+                  className="mt-4 px-4 py-2 text-xs font-medium text-slate-700 bg-white border border-slate-200 hover:bg-slate-50 rounded-lg transition-colors whitespace-nowrap cursor-pointer"
+                >
+                  Clear Filters
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={onOpenRegister}
+                  className="mt-4 px-4 py-2 text-xs font-medium text-white bg-teal-700 hover:bg-teal-800 rounded-lg transition-colors whitespace-nowrap cursor-pointer"
+                >
+                  Register Patient
+                </button>
+              )}
             </div>
           ) : (
-            <div className="overflow-x-auto">
+            <div className="overflow-x-auto print:overflow-visible">
               <table className="w-full text-left border-collapse">
                 <thead>
                   <tr className="border-b border-slate-200 bg-slate-50/70 text-[11px] font-medium text-slate-500">
@@ -224,7 +375,7 @@ export function TriageQueueView({
                     <th className="py-2.5 px-3">Priority</th>
                     <th className="py-2.5 px-3">Vitals</th>
                     <th className="py-2.5 px-3 text-right">Wait / Est.</th>
-                    <th className="py-2.5 pl-3 pr-5 text-right">Actions</th>
+                    <th className="py-2.5 pl-3 pr-5 text-right no-print">Actions</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-200 text-sm">
@@ -254,7 +405,15 @@ export function TriageQueueView({
                           <p className="mt-1 text-xs text-slate-700 line-clamp-2">{patient.complaint}</p>
                         </td>
                         <td className="py-3.5 px-3 align-top">
-                          <PriorityText priority={patient.priority} />
+                          <div className="space-y-1">
+                            <PriorityText priority={patient.priority} pulseOnCritical />
+                            <div>
+                              <PatientStatusText
+                                status={patient.status}
+                                isCritical={patient.priority === 1}
+                              />
+                            </div>
+                          </div>
                         </td>
                         <td className="py-3.5 px-3 align-top">
                           <div className="font-mono tabular-nums text-xs text-slate-700 space-y-0.5 whitespace-nowrap">
@@ -280,15 +439,15 @@ export function TriageQueueView({
                               : `~${patient.estimatedWaitMinutes}m est`}
                           </div>
                         </td>
-                        <td className="py-3.5 pl-3 pr-5 align-top text-right">
-                          <div className="inline-flex items-center justify-end gap-1.5">
+                        <td className="py-3.5 pl-3 pr-5 align-top text-right no-print">
+                          <div className="flex flex-wrap items-center justify-end gap-1.5 min-w-[205px]">
                             <button
                               type="button"
                               onClick={() => onOpenPriorityModal(patient)}
                               title="Escalate or adjust priority"
-                              className="px-2.5 py-1.5 text-xs font-medium text-slate-700 bg-white border border-slate-200 hover:bg-slate-50 rounded-md transition-colors whitespace-nowrap inline-flex items-center gap-1 cursor-pointer"
+                              className="px-2 py-1 text-[11px] font-medium text-slate-700 bg-white border border-slate-200 hover:bg-slate-50 rounded-md transition-colors whitespace-nowrap inline-flex items-center gap-1 cursor-pointer"
                             >
-                              <ArrowUpDown className="w-3.5 h-3.5" />
+                              <ArrowUpDown className="w-3 h-3" />
                               <span>Priority</span>
                             </button>
                             <button
@@ -300,18 +459,38 @@ export function TriageQueueView({
                                   ? 'No doctors currently available'
                                   : 'Assign available doctor'
                               }
-                              className="px-2.5 py-1.5 text-xs font-medium text-teal-800 bg-teal-50 border border-teal-200 hover:bg-teal-100 disabled:opacity-40 disabled:cursor-not-allowed rounded-md transition-colors whitespace-nowrap inline-flex items-center gap-1 cursor-pointer"
+                              className="px-2 py-1 text-[11px] font-medium text-teal-800 bg-teal-50 border border-teal-200 hover:bg-teal-100 disabled:opacity-40 disabled:cursor-not-allowed rounded-md transition-colors whitespace-nowrap inline-flex items-center gap-1 cursor-pointer"
                             >
-                              <UserCheck className="w-3.5 h-3.5" />
+                              <UserCheck className="w-3 h-3" />
                               <span>Assign</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => onOpenTransferModal(patient)}
+                              disabled={busyAction === `transfer-${patient.id}`}
+                              title="Trigger patient transfer workflow"
+                              className="px-2 py-1 text-[11px] font-medium text-amber-800 bg-amber-50 border border-amber-200 hover:bg-amber-100 disabled:opacity-40 disabled:cursor-not-allowed rounded-md transition-colors whitespace-nowrap inline-flex items-center gap-1 cursor-pointer"
+                            >
+                              <ArrowRightLeft className="w-3 h-3" />
+                              <span>Transfer</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => onCompleteTreatment(patient.id, 'Discharged')}
+                              disabled={busyAction === `complete-${patient.id}`}
+                              title="Mark patient as discharged"
+                              className="px-2 py-1 text-[11px] font-medium text-emerald-800 bg-emerald-50 border border-emerald-200 hover:bg-emerald-100 disabled:opacity-40 disabled:cursor-not-allowed rounded-md transition-colors whitespace-nowrap inline-flex items-center gap-1 cursor-pointer"
+                            >
+                              <CheckCircle2 className="w-3 h-3" />
+                              <span>{busyAction === `complete-${patient.id}` ? 'Discharging...' : 'Discharge'}</span>
                             </button>
                             <button
                               type="button"
                               onClick={() => onOpenTimeline(patient)}
                               title="View treatment timeline"
-                              className="p-1.5 text-slate-500 hover:text-slate-900 hover:bg-slate-100 rounded-md transition-colors cursor-pointer"
+                              className="p-1 text-slate-500 hover:text-slate-900 hover:bg-slate-100 rounded-md transition-colors cursor-pointer"
                             >
-                              <History className="w-4 h-4" />
+                              <History className="w-3.5 h-3.5" />
                             </button>
                           </div>
                         </td>
@@ -325,7 +504,7 @@ export function TriageQueueView({
         </section>
 
         {/* Right Column: Doctor Dispatch + Active Treatment Bays */}
-        <div className="xl:col-span-4 space-y-6">
+        <div className="xl:col-span-4 space-y-6 no-print">
           <section className="bg-white border border-slate-200 rounded-lg overflow-hidden">
             <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between gap-3">
               <div>
@@ -355,9 +534,11 @@ export function TriageQueueView({
                         <DoctorStatusText status={doc.status} />
                       </div>
                       {isBusy && currentPatient && (
-                        <div className="mt-1 text-xs text-slate-600 truncate">
-                          Treating <span className="font-medium">{currentPatient.name}</span> (
-                          <span className="font-mono tabular-nums">P{currentPatient.priority}</span>)
+                        <div className="mt-1 text-xs text-slate-600 flex items-center gap-1.5 truncate">
+                          <span className="truncate">
+                            Treating <span className="font-medium">{currentPatient.name}</span>
+                          </span>
+                          <PriorityText priority={currentPatient.priority} pulseOnCritical />
                         </div>
                       )}
                     </div>
@@ -420,7 +601,13 @@ export function TriageQueueView({
                             <span className="font-mono tabular-nums">{treatDuration} in bay</span>
                           </div>
                         </div>
-                        <PriorityText priority={pat.priority} />
+                        <div className="flex flex-col items-end gap-1 shrink-0">
+                          <PriorityText priority={pat.priority} pulseOnCritical />
+                          <PatientStatusText
+                            status={pat.status}
+                            isCritical={pat.priority === 1}
+                          />
+                        </div>
                       </div>
                       <div className="flex items-center justify-between gap-2 pt-1">
                         <span className="text-xs text-slate-600 truncate">
@@ -433,6 +620,14 @@ export function TriageQueueView({
                             className="px-2 py-1 text-xs font-medium text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-md cursor-pointer"
                           >
                             Timeline
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => onOpenTransferModal(pat)}
+                            disabled={busyAction === `transfer-${pat.id}`}
+                            className="px-2.5 py-1 text-xs font-medium text-amber-800 bg-amber-50 border border-amber-200 hover:bg-amber-100 rounded-md transition-colors whitespace-nowrap cursor-pointer"
+                          >
+                            Transfer
                           </button>
                           <button
                             type="button"

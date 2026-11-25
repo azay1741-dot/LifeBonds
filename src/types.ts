@@ -109,6 +109,18 @@ export interface PriorityStat {
   avgWaitMinutes: number;
 }
 
+export interface HourlyInflowBucket {
+  hourIndex: number;
+  hourStart: number;
+  label: string;
+  total: number;
+  completed: number;
+  p1: number;
+  p2: number;
+  p3: number;
+  p4: number;
+}
+
 export interface HospitalSnapshot {
   serverTime: number;
   summary: {
@@ -127,6 +139,7 @@ export interface HospitalSnapshot {
   doctors: Doctor[];
   recentEvents: TreatmentEvent[];
   priorityStats: PriorityStat[];
+  hourlyInflow24h: HourlyInflowBucket[];
   dsaInspection: {
     heapArray: HeapNodeView[];
     lastHeapTrace: HeapOperationTrace | null;
@@ -141,3 +154,42 @@ export interface HospitalSnapshot {
     linkedListLength: number;
   };
 }
+
+export type AiChatMode = 'general' | 'reasoning' | 'fast' | 'search' | 'maps';
+
+export interface GroundingSource {
+  type: 'web' | 'maps';
+  title: string;
+  uri: string;
+  reviewSnippets?: string[];
+}
+
+export interface AiChatMessage {
+  id: string;
+  role: 'user' | 'model';
+  text: string;
+  mode?: AiChatMode;
+  sources?: GroundingSource[];
+  timestamp: number;
+}
+
+export interface ReferralBookmark {
+  id: string;
+  ownerId: string;
+  facilityId: string;
+  name: string;
+  category: 'Pharmacy' | 'Outpatient Clinic' | 'Diagnostics' | 'Blood Bank' | 'Rehab Center';
+  address: string;
+  placeUri: string;
+  notes: string;
+}
+
+export interface ShiftNote {
+  id: string;
+  ownerId: string;
+  title: string;
+  body: string;
+  category: 'Shift Handoff' | 'Surge Protocol' | 'DSA Observation' | 'Equipment Check';
+  pinned: boolean;
+}
+

@@ -1,6 +1,9 @@
-import { Download, Printer, RotateCcw } from 'lucide-react';
+import { Download, FileSpreadsheet, Printer, RotateCcw } from 'lucide-react';
 import { useMemo, useState } from 'react';
+import { downloadCsvReportApi, downloadQueueSnapshotCsvApi } from '../api';
 import { HospitalSnapshot, Patient, PatientStatus } from '../types';
+import { ArrivalsCompletionsLineChart } from './ArrivalsCompletionsLineChart';
+import { InflowHeatmapChart } from './InflowHeatmapChart';
 import { PatientStatusText, PriorityText, formatClock, formatMinutesSince } from './PriorityBadge';
 
 interface ReportsAuditViewProps {
@@ -16,6 +19,9 @@ export function ReportsAuditView({
 }: ReportsAuditViewProps) {
   const [statusFilter, setStatusFilter] = useState<'All' | PatientStatus>('All');
   const [resetting, setResetting] = useState(false);
+  const [downloading, setDownloading] = useState(false);
+  const [downloadingQueue, setDownloadingQueue] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   const doctorNameById = useMemo(
     () => new Map(snapshot.doctors.map((d) => [d.id, d.name])),
@@ -29,8 +35,11 @@ export function ReportsAuditView({
 
   async function handleReset() {
     setResetting(true);
+    setActionError(null);
     try {
       await onResetDemo();
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Unable to reset demo data.');
     } finally {
       setResetting(false);
     }
@@ -44,19 +53,53 @@ export function ReportsAuditView({
             Patient Management Reports &amp; Audit Trail
           </h2>
           <p className="text-xs text-slate-500">
-            Shift throughput breakdown by triage level, full patient registry, and Doubly Linked List event log
+            24-hour arrival heat map, shift throughput breakdown, full patient registry, and Doubly Linked List event log
           </p>
         </div>
 
         <div className="flex flex-wrap items-center gap-2 no-print">
-          <a
-            href="/api/reports/export"
-            download="pulsequeue-er-report.csv"
-            className="px-3.5 py-2 text-xs font-medium text-white bg-teal-700 hover:bg-teal-800 rounded-lg transition-colors whitespace-nowrap inline-flex items-center gap-1.5"
+          <button
+            type="button"
+            disabled={downloadingQueue}
+            title="Download current Emergency Min-Heap and Walk-In FIFO waiting queue snapshot as CSV"
+            onClick={async () => {
+              setDownloadingQueue(true);
+              setActionError(null);
+              try {
+                await downloadQueueSnapshotCsvApi();
+              } catch (err) {
+                setActionError(
+                  err instanceof Error ? err.message : 'Unable to export queue snapshot CSV.'
+                );
+              } finally {
+                setDownloadingQueue(false);
+              }
+            }}
+            className="px-3.5 py-2 text-xs font-medium text-teal-800 bg-teal-50 border border-teal-200 hover:bg-teal-100 rounded-lg transition-colors whitespace-nowrap inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-60"
+          >
+            <FileSpreadsheet className="w-3.5 h-3.5" />
+            <span>{downloadingQueue ? 'Exporting Queue...' : 'Download Queue Snapshot CSV'}</span>
+          </button>
+          <button
+            type="button"
+            disabled={downloading}
+            title="Download complete patient registry report as CSV"
+            onClick={async () => {
+              setDownloading(true);
+              setActionError(null);
+              try {
+                await downloadCsvReportApi();
+              } catch (err) {
+                setActionError(err instanceof Error ? err.message : 'Unable to export CSV report.');
+              } finally {
+                setDownloading(false);
+              }
+            }}
+            className="px-3.5 py-2 text-xs font-medium text-white bg-teal-700 hover:bg-teal-800 rounded-lg transition-colors whitespace-nowrap inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-60"
           >
             <Download className="w-3.5 h-3.5" />
-            <span>Download CSV</span>
-          </a>
+            <span>{downloading ? 'Exporting...' : 'Download CSV'}</span>
+          </button>
           <button
             type="button"
             onClick={() => window.print()}
@@ -69,13 +112,35 @@ export function ReportsAuditView({
             type="button"
             disabled={resetting}
             onClick={handleReset}
-            className="px-3.5 py-2 text-xs font-medium text-slate-600 bg-white border border-slate-200 hover:bg-slate-50 rounded-lg transition-colors whitespace-nowrap inline-flex items-center gap-1.5 cursor-pointer"
+            className="px-3.5 py-2 text-xs font-medium text-slate-600 bg-white border border-slate-200 hover:bg-slate-50 rounded-lg transition-colors whitespace-nowrap inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-60"
           >
             <RotateCcw className="w-3.5 h-3.5" />
             <span>{resetting ? 'Resetting...' : 'Reset Demo Data'}</span>
           </button>
         </div>
       </div>
+
+      {actionError && (
+        <div
+          role="alert"
+          className="px-4 py-2.5 bg-red-50 border border-red-200 rounded-lg flex items-center justify-between gap-3 text-xs text-red-800 no-print"
+        >
+          <span>{actionError}</span>
+          <button
+            type="button"
+            onClick={() => setActionError(null)}
+            className="font-medium underline cursor-pointer"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+
+      {/* 24-Hour Patient Inflow Heat Map (Recharts) */}
+      <InflowHeatmapChart buckets={snapshot.hourlyInflow24h} />
+
+      {/* 24-Hour Arrivals vs Completions Line Chart (Recharts) */}
+      <ArrivalsCompletionsLineChart buckets={snapshot.hourlyInflow24h} />
 
       {/* Priority Breakdown Matrix */}
       <section className="bg-white border border-slate-200 rounded-lg overflow-hidden">

@@ -69,6 +69,12 @@ export function RegisterPatientModal({ open, onClose, onSubmit }: RegisterModalP
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
+  useEffect(() => {
+    if (open) {
+      setError(null);
+    }
+  }, [open]);
+
   if (!open) return null;
 
   function applyPreset(preset: RegisterPatientPayload) {
@@ -159,6 +165,8 @@ export function RegisterPatientModal({ open, onClose, onSubmit }: RegisterModalP
               <input
                 type="text"
                 required
+                minLength={2}
+                maxLength={80}
                 value={name}
                 onChange={(e) => setName(e.target.value)}
                 placeholder="Enter full name"
@@ -211,6 +219,8 @@ export function RegisterPatientModal({ open, onClose, onSubmit }: RegisterModalP
               <input
                 type="text"
                 required
+                minLength={5}
+                maxLength={30}
                 value={contact}
                 onChange={(e) => setContact(e.target.value)}
                 className="w-full px-3 py-2 text-sm font-mono border border-slate-200 rounded-lg focus:outline-none focus:border-teal-600"
@@ -223,6 +233,8 @@ export function RegisterPatientModal({ open, onClose, onSubmit }: RegisterModalP
               <input
                 type="text"
                 required
+                minLength={3}
+                maxLength={300}
                 value={complaint}
                 onChange={(e) => setComplaint(e.target.value)}
                 placeholder="e.g., Acute dyspnea, trauma laceration, high fever..."
@@ -493,11 +505,14 @@ export function AssignDoctorModal({
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (patient && available.length > 0) {
+    if (!patient) return;
+    setError(null);
+    if (available.length === 0) {
+      setSelectedDoctorId('');
+    } else if (!available.some((d) => d.id === selectedDoctorId)) {
       setSelectedDoctorId(available[0].id);
-      setError(null);
     }
-  }, [patient]);
+  }, [patient, doctors]);
 
   if (!patient) return null;
 
@@ -601,6 +616,7 @@ interface TimelineDrawerProps {
   patient: Patient | null;
   events: TreatmentEvent[];
   loading: boolean;
+  error?: string | null;
   onClose: () => void;
 }
 
@@ -608,6 +624,7 @@ export function PatientTimelineDrawer({
   patient,
   events,
   loading,
+  error,
   onClose,
 }: TimelineDrawerProps) {
   if (!patient) return null;
@@ -649,6 +666,8 @@ export function PatientTimelineDrawer({
           </h3>
           {loading ? (
             <p className="text-xs text-slate-500">Loading patient timeline...</p>
+          ) : error ? (
+            <p className="text-xs text-red-700">{error}</p>
           ) : events.length === 0 ? (
             <p className="text-xs text-slate-500">No recorded events for this patient yet.</p>
           ) : (
@@ -669,3 +688,167 @@ export function PatientTimelineDrawer({
     </div>
   );
 }
+
+/* 5. Patient Transfer Workflow Modal */
+const TRANSFER_DESTINATIONS = [
+  'Cardiology / Cath Lab',
+  'Surgical ICU',
+  'Neurology / Stroke Unit',
+  'Specialty Ward',
+  'External Trauma Center',
+];
+
+interface TransferModalProps {
+  patient: Patient | null;
+  onClose: () => void;
+  onTransfer: (patientId: string, destination: string, reason: string) => Promise<void>;
+}
+
+export function TransferPatientModal({ patient, onClose, onTransfer }: TransferModalProps) {
+  const [destination, setDestination] = useState(TRANSFER_DESTINATIONS[0]);
+  const [reason, setReason] = useState('Specialty care transfer from triage');
+  const [error, setError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+
+  useEffect(() => {
+    if (patient) {
+      const lower = patient.complaint.toLowerCase();
+      if (lower.includes('stroke') || lower.includes('speech') || lower.includes('headache')) {
+        setDestination('Neurology / Stroke Unit');
+      } else if (lower.includes('chest') || lower.includes('cardiac')) {
+        setDestination('Cardiology / Cath Lab');
+      } else if (patient.priority === 1) {
+        setDestination('Surgical ICU');
+      } else {
+        setDestination('Specialty Ward');
+      }
+      setReason('Requires specialty unit bed & clinical handoff');
+      setError(null);
+    }
+  }, [patient]);
+
+  if (!patient) return null;
+
+  async function handleSubmit(e: FormEvent) {
+    e.preventDefault();
+    if (!patient) return;
+    setError(null);
+    setSubmitting(true);
+    try {
+      await onTransfer(patient.id, destination.trim(), reason.trim());
+      onClose();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to transfer patient.');
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  const originText =
+    patient.status === 'In Treatment'
+      ? `In Treatment (${patient.assignedBay ?? 'ER Bay'})`
+      : patient.queueType === 'emergency_heap'
+        ? 'Emergency Min-Heap'
+        : 'Standard Walk-In FIFO';
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-4">
+      <div className="bg-white border border-slate-200 rounded-xl w-full max-w-md overflow-hidden">
+        <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between">
+          <div>
+            <h2 className="text-sm font-semibold text-slate-900">Patient Transfer Workflow</h2>
+            <p className="text-xs text-slate-500">
+              {patient.name} ({patient.mrn}) · {originText}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close transfer modal"
+            className="p-1.5 text-slate-400 hover:text-slate-700 rounded-lg cursor-pointer"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        <form onSubmit={handleSubmit} className="p-5 space-y-4">
+          <div className="flex items-center justify-between text-xs bg-slate-50 border border-slate-200 rounded-lg px-3 py-2">
+            <PriorityText priority={patient.priority} pulseOnCritical />
+            <PatientStatusText status={patient.status} isCritical={patient.priority === 1} />
+          </div>
+
+          <div>
+            <label className="block text-xs font-medium text-slate-700 mb-1.5">
+              Receiving Unit / Facility
+            </label>
+            <div className="flex flex-wrap gap-1.5 mb-2">
+              {TRANSFER_DESTINATIONS.map((unit) => (
+                <button
+                  key={unit}
+                  type="button"
+                  onClick={() => setDestination(unit)}
+                  className={`px-2.5 py-1 text-xs font-medium rounded-md border transition-colors cursor-pointer ${
+                    destination === unit
+                      ? 'border-amber-600 bg-amber-50 text-amber-900'
+                      : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'
+                  }`}
+                >
+                  {unit}
+                </button>
+              ))}
+            </div>
+            <input
+              type="text"
+              required
+              minLength={2}
+              maxLength={120}
+              value={destination}
+              onChange={(e) => setDestination(e.target.value)}
+              placeholder="Enter destination unit or receiving hospital"
+              className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg focus:outline-none focus:border-teal-600"
+            />
+          </div>
+
+          <div>
+            <label className="block text-xs font-medium text-slate-700 mb-1">
+              Transfer Reason / Clinical Handoff Note
+            </label>
+            <input
+              type="text"
+              required
+              minLength={3}
+              maxLength={250}
+              value={reason}
+              onChange={(e) => setReason(e.target.value)}
+              className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg focus:outline-none focus:border-teal-600"
+            />
+          </div>
+
+          <p className="text-xs text-slate-500">
+            Removes patient from {originText}, marks status as Transferred, and logs a TRANSFERRED audit event.
+          </p>
+
+          {error && <p className="text-xs font-medium text-red-700">{error}</p>}
+
+          <div className="flex justify-end gap-2 pt-2">
+            <button
+              type="button"
+              onClick={onClose}
+              className="px-3.5 py-2 text-xs font-medium text-slate-600 hover:text-slate-900 rounded-lg cursor-pointer"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={submitting || destination.trim().length < 2}
+              className="px-4 py-2 text-xs font-medium text-white bg-amber-600 hover:bg-amber-700 disabled:bg-slate-200 disabled:text-slate-500 rounded-lg transition-colors cursor-pointer"
+            >
+              {submitting ? 'Transferring...' : 'Confirm Transfer'}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+

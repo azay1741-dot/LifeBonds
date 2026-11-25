@@ -1,18 +1,31 @@
 import {
+  ensureSeededInDb,
+  getAllDoctorsFromDb,
+  getAllEventsFromDb,
+  getAllPatientsFromDb,
+  getSequenceCountsFromDb,
+  insertDoctorInDb,
+  insertEventInDb,
+  insertPatientInDb,
+  resetDemoDataInDb,
+  updateDoctorInDb,
+  updatePatientInDb,
+} from '../src/db/repository.ts';
+import {
   Doctor,
   DoctorStatus,
   HospitalSnapshot,
+  HourlyInflowBucket,
   Patient,
   PriorityLevel,
   PriorityStat,
   TreatmentEvent,
   Vitals,
 } from '../src/types.ts';
-import { HospitalDatabase } from './db.ts';
 import { FifoQueue } from './dsa/FifoQueue.ts';
 import { CustomHashMap } from './dsa/HashMap.ts';
 import { DoublyLinkedList } from './dsa/LinkedList.ts';
-import { MinHeapPriorityQueue, TriageHeapEntry } from './dsa/MinHeapPriorityQueue.ts';
+import { MinHeapPriorityQueue } from './dsa/MinHeapPriorityQueue.ts';
 
 interface FifoEntry {
   patientId: string;
@@ -47,7 +60,6 @@ export interface RegisterPatientInput {
 }
 
 export class HospitalTriageEngine {
-  private db: HospitalDatabase;
   private patientMap = new CustomHashMap<Patient>(32);
   private doctorMap = new CustomHashMap<Doctor>(16);
   private emergencyHeap = new MinHeapPriorityQueue();
@@ -55,12 +67,41 @@ export class HospitalTriageEngine {
   private eventLog = new DoublyLinkedList<TreatmentEvent>();
   private mrnToIdMap = new CustomHashMap<string>(32);
 
-  constructor() {
-    this.db = new HospitalDatabase();
-    this.hydrateFromDatabase();
+  private ready = false;
+  private initPromise: Promise<void> | null = null;
+  private writeQueue: Promise<unknown> = Promise.resolve();
+
+  async ensureReady(): Promise<void> {
+    if (this.ready) return;
+    if (!this.initPromise) {
+      this.initPromise = (async () => {
+        await ensureSeededInDb();
+        await this.hydrateFromDatabase();
+        this.ready = true;
+      })().catch((err) => {
+        this.initPromise = null;
+        throw err;
+      });
+    }
+    await this.initPromise;
   }
 
-  private hydrateFromDatabase(): void {
+  private runSerialized<T>(fn: () => Promise<T>): Promise<T> {
+    const next = this.writeQueue.then(fn, fn);
+    this.writeQueue = next.then(
+      () => undefined,
+      () => undefined
+    );
+    return next;
+  }
+
+  private async hydrateFromDatabase(): Promise<void> {
+    const [doctors, patients, events] = await Promise.all([
+      getAllDoctorsFromDb(),
+      getAllPatientsFromDb(),
+      getAllEventsFromDb(),
+    ]);
+
     this.patientMap.clear();
     this.doctorMap.clear();
     this.emergencyHeap.clear();
@@ -68,12 +109,10 @@ export class HospitalTriageEngine {
     this.eventLog.clear();
     this.mrnToIdMap.clear();
 
-    const doctors = this.db.getAllDoctors();
     for (const d of doctors) {
       this.doctorMap.set(d.id, d);
     }
 
-    const patients = this.db.getAllPatients();
     for (const p of patients) {
       this.patientMap.set(p.id, p);
       this.mrnToIdMap.set(p.mrn, p.id);
@@ -101,18 +140,18 @@ export class HospitalTriageEngine {
       }
     }
 
-    const events = this.db.getAllEvents();
     for (const e of events) {
       this.eventLog.append(e);
     }
   }
 
-  private createEvent(
+  private async createEvent(
     patient: Patient,
     action: TreatmentEvent['action'],
-    detail: string
-  ): TreatmentEvent {
-    const seq = this.db.getNextSequenceNumbers().eventSeq;
+    detail: string,
+    actorUid?: string
+  ): Promise<TreatmentEvent> {
+    const seq = (await getSequenceCountsFromDb()).eventSeq;
     const evt: TreatmentEvent = {
       id: `EVT-${seq}-${Math.floor(Math.random() * 900 + 100)}`,
       patientId: patient.id,
@@ -123,182 +162,221 @@ export class HospitalTriageEngine {
       priorityAtEvent: patient.priority,
       timestamp: Date.now(),
     };
-    this.db.insertEvent(evt);
+    await insertEventInDb(evt, actorUid);
     this.eventLog.append(evt);
     return evt;
   }
 
-  registerPatient(input: RegisterPatientInput): Patient {
-    const seq = this.db.getNextSequenceNumbers();
-    const id = `PAT-${seq.patientSeq}-${Math.floor(Math.random() * 90 + 10)}`;
-    const mrn = `ER-2026-${String(seq.mrnSeq).padStart(3, '0')}${Math.floor(Math.random() * 9)}`;
-    const now = Date.now();
-    const queueType = input.priority <= 3 ? 'emergency_heap' : 'standard_fifo';
-
-    const patient: Patient = {
-      id,
-      mrn,
-      name: input.name,
-      age: input.age,
-      gender: input.gender,
-      bloodGroup: input.bloodGroup,
-      contact: input.contact,
-      complaint: input.complaint,
-      priority: input.priority,
-      status: 'Waiting',
-      queueType,
-      vitals: input.vitals,
-      assignedDoctorId: null,
-      assignedBay: null,
-      arrivedAt: now,
-      treatmentStartedAt: null,
-      dischargedAt: null,
-      estimatedWaitMinutes: 0,
-    };
-
-    this.db.insertPatient(patient);
-    this.patientMap.set(patient.id, patient);
-    this.mrnToIdMap.set(patient.mrn, patient.id);
-
-    if (queueType === 'emergency_heap') {
-      this.emergencyHeap.insert({
-        patientId: patient.id,
-        mrn: patient.mrn,
-        name: patient.name,
-        priority: patient.priority,
-        arrivedAt: patient.arrivedAt,
-      });
-      this.createEvent(
-        patient,
-        'REGISTERED',
-        `Triaged as ${PRIORITY_LABELS[patient.priority]} and inserted into Emergency Min-Heap.`
-      );
-    } else {
-      this.standardQueue.enqueue({
-        patientId: patient.id,
-        mrn: patient.mrn,
-        name: patient.name,
-        arrivedAt: patient.arrivedAt,
-      });
-      this.createEvent(
-        patient,
-        'REGISTERED',
-        'Registered as P4 Standard and appended to Walk-In FIFO Queue.'
-      );
-    }
-
-    return patient;
-  }
-
-  updatePatientPriority(patientId: string, newPriority: PriorityLevel, reason: string): Patient {
-    const patient = this.patientMap.get(patientId);
-    if (!patient) {
-      throw new Error('NOT_FOUND:Patient not found');
-    }
-    if (patient.status !== 'Waiting') {
-      throw new Error('CONFLICT:Priority can only be changed while patient is Waiting');
-    }
-
-    const oldPriority = patient.priority;
-    if (oldPriority === newPriority) {
-      return patient;
-    }
-
-    patient.priority = newPriority;
-
-    if (patient.queueType === 'standard_fifo' && newPriority <= 3) {
-      this.standardQueue.removeById(patient.id);
-      patient.queueType = 'emergency_heap';
-      this.emergencyHeap.insert({
-        patientId: patient.id,
-        mrn: patient.mrn,
-        name: patient.name,
-        priority: newPriority,
-        arrivedAt: patient.arrivedAt,
-      });
-    } else if (patient.queueType === 'emergency_heap') {
-      this.emergencyHeap.updatePriority(patient.id, newPriority);
-    }
-
-    this.db.updatePatient(patient);
-    this.patientMap.set(patient.id, patient);
-
-    const isEscalation = newPriority < oldPriority;
-    this.createEvent(
-      patient,
-      isEscalation ? 'PRIORITY_ESCALATED' : 'PRIORITY_DOWNGRADED',
-      `Priority changed P${oldPriority} -> P${newPriority}. Reason: ${reason}`
-    );
-
-    return patient;
-  }
-
-  dispatchNextToDoctor(doctorId: string): { patient: Patient; doctor: Doctor } {
-    const doctor = this.doctorMap.get(doctorId);
-    if (!doctor) {
-      throw new Error('NOT_FOUND:Doctor not found');
-    }
-    if (doctor.status !== 'Available') {
-      throw new Error('CONFLICT:Selected doctor is not currently available');
-    }
-
-    let nextPatientId: string | null = null;
-    let sourceLabel = 'Emergency Min-Heap';
-
-    const heapMin = this.emergencyHeap.extractMin();
-    if (heapMin) {
-      nextPatientId = heapMin.patientId;
-    } else {
-      const fifoNext = this.standardQueue.dequeue();
-      if (fifoNext) {
-        nextPatientId = fifoNext.patientId;
-        sourceLabel = 'Standard FIFO Queue';
+  async registerPatient(input: RegisterPatientInput, actorUid?: string): Promise<Patient> {
+    await this.ensureReady();
+    return this.runSerialized(async () => {
+      const seq = await getSequenceCountsFromDb();
+      let id = `PAT-${seq.patientSeq}-${Math.floor(Math.random() * 90 + 10)}`;
+      while (this.patientMap.has(id)) {
+        id = `PAT-${seq.patientSeq}-${Math.floor(Math.random() * 900 + 100)}`;
       }
-    }
+      let mrn = `ER-2026-${String(seq.mrnSeq).padStart(3, '0')}${Math.floor(Math.random() * 10)}`;
+      let mrnOffset = 1;
+      while (this.mrnToIdMap.has(mrn)) {
+        mrn = `ER-2026-${String(seq.mrnSeq + mrnOffset).padStart(3, '0')}${Math.floor(Math.random() * 10)}`;
+        mrnOffset++;
+      }
+      const now = Date.now();
+      const queueType = input.priority <= 3 ? 'emergency_heap' : 'standard_fifo';
 
-    if (!nextPatientId) {
-      throw new Error('CONFLICT:Both Emergency Min-Heap and Standard FIFO Queue are empty');
-    }
+      const patient: Patient = {
+        id,
+        mrn,
+        name: input.name,
+        age: input.age,
+        gender: input.gender,
+        bloodGroup: input.bloodGroup,
+        contact: input.contact,
+        complaint: input.complaint,
+        priority: input.priority,
+        status: 'Waiting',
+        queueType,
+        vitals: input.vitals,
+        assignedDoctorId: null,
+        assignedBay: null,
+        arrivedAt: now,
+        treatmentStartedAt: null,
+        dischargedAt: null,
+        estimatedWaitMinutes: 0,
+      };
 
-    const patient = this.patientMap.get(nextPatientId);
-    if (!patient) {
-      throw new Error('NOT_FOUND:Queued patient record missing');
-    }
+      await insertPatientInDb(patient, actorUid);
+      this.patientMap.set(patient.id, patient);
+      this.mrnToIdMap.set(patient.mrn, patient.id);
 
-    return this.bindPatientToDoctor(patient, doctor, `Extracted from ${sourceLabel}`);
+      if (queueType === 'emergency_heap') {
+        this.emergencyHeap.insert({
+          patientId: patient.id,
+          mrn: patient.mrn,
+          name: patient.name,
+          priority: patient.priority,
+          arrivedAt: patient.arrivedAt,
+        });
+        await this.createEvent(
+          patient,
+          'REGISTERED',
+          `Triaged as ${PRIORITY_LABELS[patient.priority]} and inserted into Emergency Min-Heap.`,
+          actorUid
+        );
+      } else {
+        this.standardQueue.enqueue({
+          patientId: patient.id,
+          mrn: patient.mrn,
+          name: patient.name,
+          arrivedAt: patient.arrivedAt,
+        });
+        await this.createEvent(
+          patient,
+          'REGISTERED',
+          'Registered as P4 Standard and appended to Walk-In FIFO Queue.',
+          actorUid
+        );
+      }
+
+      return patient;
+    });
   }
 
-  assignDoctorToPatient(patientId: string, doctorId: string): { patient: Patient; doctor: Doctor } {
-    const patient = this.patientMap.get(patientId);
-    if (!patient) {
-      throw new Error('NOT_FOUND:Patient not found');
-    }
-    if (patient.status !== 'Waiting') {
-      throw new Error('CONFLICT:Patient is not in a Waiting state');
-    }
+  async updatePatientPriority(
+    patientId: string,
+    newPriority: PriorityLevel,
+    reason: string,
+    actorUid?: string
+  ): Promise<Patient> {
+    await this.ensureReady();
+    return this.runSerialized(async () => {
+      const patient = this.patientMap.get(patientId);
+      if (!patient) {
+        throw new Error('NOT_FOUND:Patient not found');
+      }
+      if (patient.status !== 'Waiting') {
+        throw new Error('CONFLICT:Priority can only be changed while patient is Waiting');
+      }
 
-    const doctor = this.doctorMap.get(doctorId);
-    if (!doctor) {
-      throw new Error('NOT_FOUND:Doctor not found');
-    }
-    if (doctor.status !== 'Available') {
-      throw new Error('CONFLICT:Doctor is not available');
-    }
+      const oldPriority = patient.priority;
+      if (oldPriority === newPriority) {
+        return patient;
+      }
 
-    if (patient.queueType === 'emergency_heap') {
-      this.emergencyHeap.removeById(patient.id);
-    } else if (patient.queueType === 'standard_fifo') {
-      this.standardQueue.removeById(patient.id);
-    }
+      const updated: Patient = { ...patient, priority: newPriority };
+      if (updated.queueType === 'standard_fifo' && newPriority <= 3) {
+        updated.queueType = 'emergency_heap';
+      }
 
-    return this.bindPatientToDoctor(patient, doctor, 'Direct triage allocation');
+      await updatePatientInDb(updated);
+
+      if (patient.queueType === 'standard_fifo' && newPriority <= 3) {
+        this.standardQueue.removeById(updated.id);
+        this.emergencyHeap.insert({
+          patientId: updated.id,
+          mrn: updated.mrn,
+          name: updated.name,
+          priority: newPriority,
+          arrivedAt: updated.arrivedAt,
+        });
+      } else if (updated.queueType === 'emergency_heap') {
+        this.emergencyHeap.updatePriority(updated.id, newPriority);
+      }
+
+      this.patientMap.set(updated.id, updated);
+
+      const isEscalation = newPriority < oldPriority;
+      await this.createEvent(
+        updated,
+        isEscalation ? 'PRIORITY_ESCALATED' : 'PRIORITY_DOWNGRADED',
+        `Priority changed P${oldPriority} -> P${newPriority}. Reason: ${reason}`,
+        actorUid
+      );
+
+      return updated;
+    });
   }
 
-  private bindPatientToDoctor(
+  async dispatchNextToDoctor(
+    doctorId: string,
+    actorUid?: string
+  ): Promise<{ patient: Patient; doctor: Doctor }> {
+    await this.ensureReady();
+    return this.runSerialized(async () => {
+      const doctor = this.doctorMap.get(doctorId);
+      if (!doctor) {
+        throw new Error('NOT_FOUND:Doctor not found');
+      }
+      if (doctor.status !== 'Available') {
+        throw new Error('CONFLICT:Selected doctor is not currently available');
+      }
+
+      let nextPatientId: string | null = null;
+      let sourceLabel = 'Emergency Min-Heap';
+
+      const heapMin = this.emergencyHeap.extractMin();
+      if (heapMin) {
+        nextPatientId = heapMin.patientId;
+      } else {
+        const fifoNext = this.standardQueue.dequeue();
+        if (fifoNext) {
+          nextPatientId = fifoNext.patientId;
+          sourceLabel = 'Standard FIFO Queue';
+        }
+      }
+
+      if (!nextPatientId) {
+        throw new Error('CONFLICT:Both Emergency Min-Heap and Standard FIFO Queue are empty');
+      }
+
+      const patient = this.patientMap.get(nextPatientId);
+      if (!patient) {
+        throw new Error('NOT_FOUND:Queued patient record missing');
+      }
+
+      return this.bindPatientToDoctor(patient, doctor, `Extracted from ${sourceLabel}`, actorUid);
+    });
+  }
+
+  async assignDoctorToPatient(
+    patientId: string,
+    doctorId: string,
+    actorUid?: string
+  ): Promise<{ patient: Patient; doctor: Doctor }> {
+    await this.ensureReady();
+    return this.runSerialized(async () => {
+      const patient = this.patientMap.get(patientId);
+      if (!patient) {
+        throw new Error('NOT_FOUND:Patient not found');
+      }
+      if (patient.status !== 'Waiting') {
+        throw new Error('CONFLICT:Patient is not in a Waiting state');
+      }
+
+      const doctor = this.doctorMap.get(doctorId);
+      if (!doctor) {
+        throw new Error('NOT_FOUND:Doctor not found');
+      }
+      if (doctor.status !== 'Available') {
+        throw new Error('CONFLICT:Doctor is not available');
+      }
+
+      if (patient.queueType === 'emergency_heap') {
+        this.emergencyHeap.removeById(patient.id);
+      } else if (patient.queueType === 'standard_fifo') {
+        this.standardQueue.removeById(patient.id);
+      }
+
+      return this.bindPatientToDoctor(patient, doctor, 'Direct triage allocation', actorUid);
+    });
+  }
+
+  private async bindPatientToDoctor(
     patient: Patient,
     doctor: Doctor,
-    methodNote: string
-  ): { patient: Patient; doctor: Doctor } {
+    methodNote: string,
+    actorUid?: string
+  ): Promise<{ patient: Patient; doctor: Doctor }> {
     const now = Date.now();
     patient.status = 'In Treatment';
     patient.queueType = 'none';
@@ -309,96 +387,208 @@ export class HospitalTriageEngine {
     doctor.status = 'Busy';
     doctor.currentPatientId = patient.id;
 
-    this.db.updatePatient(patient);
-    this.db.updateDoctor(doctor);
+    await updatePatientInDb(patient);
+    await updateDoctorInDb(doctor);
     this.patientMap.set(patient.id, patient);
     this.doctorMap.set(doctor.id, doctor);
 
-    this.createEvent(
+    await this.createEvent(
       patient,
       'DOCTOR_ALLOCATED',
-      `${methodNote}: assigned to ${doctor.name} (${doctor.bay}).`
+      `${methodNote}: assigned to ${doctor.name} (${doctor.bay}).`,
+      actorUid
     );
 
     return { patient, doctor };
   }
 
-  completePatientTreatment(patientId: string, outcome: 'Discharged' | 'Transferred'): Patient {
-    const patient = this.patientMap.get(patientId);
-    if (!patient) {
-      throw new Error('NOT_FOUND:Patient not found');
-    }
-    if (patient.status !== 'In Treatment') {
-      throw new Error('CONFLICT:Only patients currently In Treatment can be discharged or transferred');
-    }
-
-    const now = Date.now();
-    patient.status = outcome;
-    patient.dischargedAt = now;
-    this.db.updatePatient(patient);
-    this.patientMap.set(patient.id, patient);
-
-    if (patient.assignedDoctorId) {
-      const doctor = this.doctorMap.get(patient.assignedDoctorId);
-      if (doctor) {
-        doctor.status = 'Available';
-        doctor.currentPatientId = null;
-        doctor.patientsHandledToday += 1;
-        this.db.updateDoctor(doctor);
-        this.doctorMap.set(doctor.id, doctor);
+  async transferPatient(
+    patientId: string,
+    destination: string,
+    reason: string,
+    actorUid?: string
+  ): Promise<Patient> {
+    await this.ensureReady();
+    return this.runSerialized(async () => {
+      const patient = this.patientMap.get(patientId);
+      if (!patient) {
+        throw new Error('NOT_FOUND:Patient not found');
       }
-    }
+      if (patient.status === 'Discharged' || patient.status === 'Transferred') {
+        throw new Error(`CONFLICT:Patient has already been marked ${patient.status}`);
+      }
 
-    this.createEvent(
-      patient,
-      outcome === 'Discharged' ? 'DISCHARGED' : 'TRANSFERRED',
-      `Treatment completed; patient marked ${outcome} from ${patient.assignedBay ?? 'ER Bay'}.`
-    );
+      const previousStatus = patient.status;
+      const originQueue = patient.queueType;
+      const originBay = patient.assignedBay;
+      let originLabel = 'Triage Queue';
 
-    return patient;
+      if (previousStatus === 'Waiting') {
+        if (originQueue === 'emergency_heap') {
+          this.emergencyHeap.removeById(patient.id);
+          originLabel = 'Emergency Min-Heap';
+        } else if (originQueue === 'standard_fifo') {
+          this.standardQueue.removeById(patient.id);
+          originLabel = 'Standard Walk-In FIFO';
+        }
+      } else if (previousStatus === 'In Treatment') {
+        originLabel = originBay ?? 'ER Bay';
+        if (patient.assignedDoctorId) {
+          const doctor = this.doctorMap.get(patient.assignedDoctorId);
+          if (doctor) {
+            doctor.status = 'Available';
+            doctor.currentPatientId = null;
+            doctor.patientsHandledToday += 1;
+            await updateDoctorInDb(doctor);
+            this.doctorMap.set(doctor.id, doctor);
+          }
+        }
+      }
+
+      const now = Date.now();
+      patient.status = 'Transferred';
+      patient.queueType = 'none';
+      patient.dischargedAt = now;
+      await updatePatientInDb(patient);
+      this.patientMap.set(patient.id, patient);
+
+      await this.createEvent(
+        patient,
+        'TRANSFERRED',
+        `Transferred from ${originLabel} to ${destination}. Reason: ${reason}`,
+        actorUid
+      );
+
+      return patient;
+    });
   }
 
-  toggleDoctorAvailability(doctorId: string, status: 'Available' | 'Off-Duty'): Doctor {
-    const doctor = this.doctorMap.get(doctorId);
-    if (!doctor) {
-      throw new Error('NOT_FOUND:Doctor not found');
-    }
-    if (doctor.status === 'Busy' && doctor.currentPatientId) {
-      throw new Error('CONFLICT:Cannot change shift status while doctor is treating an active patient');
+  async completePatientTreatment(
+    patientId: string,
+    outcome: 'Discharged' | 'Transferred',
+    actorUid?: string
+  ): Promise<Patient> {
+    if (outcome === 'Transferred') {
+      return this.transferPatient(
+        patientId,
+        'Receiving Specialty Unit',
+        'Clinical transfer initiated',
+        actorUid
+      );
     }
 
-    doctor.status = status;
-    this.db.updateDoctor(doctor);
-    this.doctorMap.set(doctor.id, doctor);
-    return doctor;
+    await this.ensureReady();
+    return this.runSerialized(async () => {
+      const patient = this.patientMap.get(patientId);
+      if (!patient) {
+        throw new Error('NOT_FOUND:Patient not found');
+      }
+      if (patient.status === 'Discharged' || patient.status === 'Transferred') {
+        throw new Error(`CONFLICT:Patient has already been marked ${patient.status}`);
+      }
+
+      const previousStatus = patient.status;
+      const originQueue = patient.queueType;
+      const originBay = patient.assignedBay;
+      let originLabel = 'Triage Queue';
+
+      if (previousStatus === 'Waiting') {
+        if (originQueue === 'emergency_heap') {
+          this.emergencyHeap.removeById(patient.id);
+          originLabel = 'Emergency Min-Heap';
+        } else if (originQueue === 'standard_fifo') {
+          this.standardQueue.removeById(patient.id);
+          originLabel = 'Standard Walk-In FIFO';
+        }
+      } else if (previousStatus === 'In Treatment') {
+        originLabel = originBay ?? 'ER Bay';
+        if (patient.assignedDoctorId) {
+          const doctor = this.doctorMap.get(patient.assignedDoctorId);
+          if (doctor) {
+            doctor.status = 'Available';
+            doctor.currentPatientId = null;
+            doctor.patientsHandledToday += 1;
+            await updateDoctorInDb(doctor);
+            this.doctorMap.set(doctor.id, doctor);
+          }
+        }
+      }
+
+      const now = Date.now();
+      patient.status = 'Discharged';
+      patient.queueType = 'none';
+      patient.dischargedAt = now;
+      await updatePatientInDb(patient);
+      this.patientMap.set(patient.id, patient);
+
+      await this.createEvent(
+        patient,
+        'DISCHARGED',
+        previousStatus === 'Waiting'
+          ? `Discharged directly from ${originLabel} after triage clearance.`
+          : `Treatment completed; patient marked Discharged from ${originLabel}.`,
+        actorUid
+      );
+
+      return patient;
+    });
   }
 
-  addDoctor(name: string, specialty: string, bay: string): Doctor {
-    const seq = this.db.getNextSequenceNumbers().doctorSeq;
-    const doctor: Doctor = {
-      id: `DOC-${seq}-${Math.floor(Math.random() * 90 + 10)}`,
-      name,
-      specialty,
-      bay,
-      status: 'Available' as DoctorStatus,
-      currentPatientId: null,
-      patientsHandledToday: 0,
-    };
-    this.db.insertDoctor(doctor);
-    this.doctorMap.set(doctor.id, doctor);
-    return doctor;
+  async toggleDoctorAvailability(
+    doctorId: string,
+    status: 'Available' | 'Off-Duty'
+  ): Promise<Doctor> {
+    await this.ensureReady();
+    return this.runSerialized(async () => {
+      const doctor = this.doctorMap.get(doctorId);
+      if (!doctor) {
+        throw new Error('NOT_FOUND:Doctor not found');
+      }
+      if (doctor.status === 'Busy' && doctor.currentPatientId) {
+        throw new Error('CONFLICT:Cannot change shift status while doctor is treating an active patient');
+      }
+
+      doctor.status = status;
+      await updateDoctorInDb(doctor);
+      this.doctorMap.set(doctor.id, doctor);
+      return doctor;
+    });
   }
 
-  getPatientTimeline(patientId: string): TreatmentEvent[] {
+  async addDoctor(name: string, specialty: string, bay: string): Promise<Doctor> {
+    await this.ensureReady();
+    return this.runSerialized(async () => {
+      const seq = (await getSequenceCountsFromDb()).doctorSeq;
+      const doctor: Doctor = {
+        id: `DOC-${seq}-${Math.floor(Math.random() * 90 + 10)}`,
+        name,
+        specialty,
+        bay,
+        status: 'Available' as DoctorStatus,
+        currentPatientId: null,
+        patientsHandledToday: 0,
+      };
+      await insertDoctorInDb(doctor);
+      this.doctorMap.set(doctor.id, doctor);
+      return doctor;
+    });
+  }
+
+  async getPatientTimeline(patientId: string): Promise<TreatmentEvent[]> {
+    await this.ensureReady();
     return this.eventLog.filterByPatient(patientId);
   }
 
-  resetDemo(): void {
-    this.db.resetDemoData();
-    this.hydrateFromDatabase();
+  async resetDemo(): Promise<void> {
+    await this.ensureReady();
+    await this.runSerialized(async () => {
+      await resetDemoDataInDb();
+      await this.hydrateFromDatabase();
+    });
   }
 
-  getSnapshot(): HospitalSnapshot {
+  async getSnapshot(): Promise<HospitalSnapshot> {
+    await this.ensureReady();
     const now = Date.now();
     const doctors = this.doctorMap.values().sort((a, b) => a.id.localeCompare(b.id));
     const availableDoctors = doctors.filter((d) => d.status === 'Available').length;
@@ -485,6 +675,51 @@ export class HospitalTriageEngine {
       };
     });
 
+    const hourMs = 3_600_000;
+    const currentHourStart = Math.floor(now / hourMs) * hourMs;
+    const windowStart = currentHourStart - 23 * hourMs;
+    const hourlyInflow24h: HourlyInflowBucket[] = Array.from({ length: 24 }, (_, hourIndex) => {
+      const hourStart = windowStart + hourIndex * hourMs;
+      const d = new Date(hourStart);
+      const label = `${String(d.getHours()).padStart(2, '0')}:00`;
+      return {
+        hourIndex,
+        hourStart,
+        label,
+        total: 0,
+        completed: 0,
+        p1: 0,
+        p2: 0,
+        p3: 0,
+        p4: 0,
+      };
+    });
+
+    for (const p of allPatients) {
+      if (p.arrivedAt >= windowStart && p.arrivedAt < currentHourStart + hourMs) {
+        const idx = Math.floor((p.arrivedAt - windowStart) / hourMs);
+        if (idx >= 0 && idx < 24) {
+          const bucket = hourlyInflow24h[idx];
+          bucket.total += 1;
+          if (p.priority === 1) bucket.p1 += 1;
+          else if (p.priority === 2) bucket.p2 += 1;
+          else if (p.priority === 3) bucket.p3 += 1;
+          else bucket.p4 += 1;
+        }
+      }
+      if (
+        (p.status === 'Discharged' || p.status === 'Transferred') &&
+        p.dischargedAt !== null &&
+        p.dischargedAt >= windowStart &&
+        p.dischargedAt < currentHourStart + hourMs
+      ) {
+        const compIdx = Math.floor((p.dischargedAt - windowStart) / hourMs);
+        if (compIdx >= 0 && compIdx < 24) {
+          hourlyInflow24h[compIdx].completed += 1;
+        }
+      }
+    }
+
     return {
       serverTime: now,
       summary: {
@@ -503,6 +738,7 @@ export class HospitalTriageEngine {
       doctors,
       recentEvents: this.eventLog.toArrayNewestFirst(60),
       priorityStats,
+      hourlyInflow24h,
       dsaInspection: {
         heapArray: this.emergencyHeap.getHeapArrayView(),
         lastHeapTrace: this.emergencyHeap.getLastTrace(),

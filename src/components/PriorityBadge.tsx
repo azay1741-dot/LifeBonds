@@ -34,28 +34,60 @@ export const PRIORITY_META: Record<
   },
 };
 
-export function PriorityText({ priority }: { priority: PriorityLevel }) {
+export function PriorityText({
+  priority,
+  pulseOnCritical = false,
+}: {
+  priority: PriorityLevel;
+  pulseOnCritical?: boolean;
+}) {
   const meta = PRIORITY_META[priority];
+  const shouldPulse = pulseOnCritical && priority === 1;
+
   return (
     <span className={`inline-flex items-center gap-2 text-xs font-semibold whitespace-nowrap ${meta.textClass}`}>
-      <span className={`h-2 w-2 rounded-xs shrink-0 ${meta.markerClass}`} aria-hidden="true" />
+      {shouldPulse ? (
+        <span className="relative inline-flex h-2 w-2 shrink-0 items-center justify-center" aria-hidden="true">
+          <span className="animate-critical-pulse absolute inset-0 rounded-full bg-red-500/60" />
+          <span className="relative h-2 w-2 rounded-full bg-red-600" />
+        </span>
+      ) : (
+        <span className={`h-2 w-2 rounded-xs shrink-0 ${meta.markerClass}`} aria-hidden="true" />
+      )}
       <span className="font-mono tabular-nums">{meta.code}</span>
       <span>{meta.label}</span>
     </span>
   );
 }
 
-export function PatientStatusText({ status }: { status: PatientStatus }) {
+export function PatientStatusText({
+  status,
+  isCritical = false,
+}: {
+  status: PatientStatus;
+  isCritical?: boolean;
+}) {
   const styles: Record<PatientStatus, { text: string; marker: string }> = {
     Waiting: { text: 'text-amber-700', marker: 'bg-amber-600' },
     'In Treatment': { text: 'text-teal-700', marker: 'bg-teal-600' },
     Discharged: { text: 'text-emerald-700', marker: 'bg-emerald-600' },
     Transferred: { text: 'text-slate-600', marker: 'bg-slate-500' },
   };
-  const s = styles[status];
+  const criticalActive = isCritical && (status === 'Waiting' || status === 'In Treatment');
+  const s = criticalActive
+    ? { text: 'text-red-700 font-semibold', marker: 'bg-red-600' }
+    : styles[status];
+
   return (
     <span className={`inline-flex items-center gap-1.5 text-xs font-medium whitespace-nowrap ${s.text}`}>
-      <span className={`h-1.5 w-1.5 rounded-xs shrink-0 ${s.marker}`} aria-hidden="true" />
+      {criticalActive ? (
+        <span className="relative inline-flex h-1.5 w-1.5 shrink-0 items-center justify-center" aria-hidden="true">
+          <span className="animate-critical-pulse absolute inset-0 rounded-full bg-red-500/65" />
+          <span className="relative h-1.5 w-1.5 rounded-full bg-red-600" />
+        </span>
+      ) : (
+        <span className={`h-1.5 w-1.5 rounded-xs shrink-0 ${s.marker}`} aria-hidden="true" />
+      )}
       <span>{status}</span>
     </span>
   );

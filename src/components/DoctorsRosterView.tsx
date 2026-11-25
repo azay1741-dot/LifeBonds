@@ -1,7 +1,9 @@
-import { Plus, UserPlus } from 'lucide-react';
+import { AlertTriangle, Plus, UserPlus } from 'lucide-react';
 import { FormEvent, useState } from 'react';
 import { HospitalSnapshot, Patient } from '../types';
-import { DoctorStatusText, PriorityText, formatMinutesSince } from './PriorityBadge';
+import { DoctorStatusText, PatientStatusText, PriorityText, formatMinutesSince } from './PriorityBadge';
+
+const PATIENTS_PER_AVAILABLE_DOCTOR_THRESHOLD = 3;
 
 interface DoctorsRosterViewProps {
   snapshot: HospitalSnapshot;
@@ -9,6 +11,7 @@ interface DoctorsRosterViewProps {
   onDispatchNext: (doctorId: string) => void;
   onToggleDoctorStatus: (doctorId: string, status: 'Available' | 'Off-Duty') => void;
   onCompleteTreatment: (patientId: string, outcome: 'Discharged' | 'Transferred') => void;
+  onOpenTransferModal: (patient: Patient) => void;
   onAddDoctor: (name: string, specialty: string, bay: string) => Promise<void>;
 }
 
@@ -18,6 +21,7 @@ export function DoctorsRosterView({
   onDispatchNext,
   onToggleDoctorStatus,
   onCompleteTreatment,
+  onOpenTransferModal,
   onAddDoctor,
 }: DoctorsRosterViewProps) {
   const [showAddForm, setShowAddForm] = useState(false);
@@ -29,6 +33,17 @@ export function DoctorsRosterView({
 
   const patientMap = new Map<string, Patient>(snapshot.allPatients.map((p) => [p.id, p]));
   const totalWaiting = snapshot.summary.emergencyWaitingCount + snapshot.summary.standardWaitingCount;
+  const inTreatmentCount = snapshot.summary.inTreatmentCount;
+  const activePatientCount = totalWaiting + inTreatmentCount;
+  const availableDoctorsCount = snapshot.summary.availableDoctorsCount;
+  const requiredAvailableDoctors =
+    activePatientCount === 0
+      ? 0
+      : Math.max(1, Math.ceil(activePatientCount / PATIENTS_PER_AVAILABLE_DOCTOR_THRESHOLD));
+  const isStaffingLow =
+    activePatientCount > 0 && availableDoctorsCount < requiredAvailableDoctors;
+  const isCriticalShortage = isStaffingLow && availableDoctorsCount === 0;
+  const firstOffDutyDoctor = snapshot.doctors.find((d) => d.status === 'Off-Duty');
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
@@ -70,6 +85,72 @@ export function DoctorsRosterView({
           <span>{showAddForm ? 'Close Form' : 'Add On-Call Doctor'}</span>
         </button>
       </div>
+
+      {isStaffingLow && (
+        <div
+          role="alert"
+          className={`px-4 py-3.5 rounded-lg border flex flex-wrap items-center justify-between gap-3 ${
+            isCriticalShortage
+              ? 'bg-red-50 border-red-200 text-red-900'
+              : 'bg-amber-50 border-amber-200 text-amber-900'
+          }`}
+        >
+          <div className="flex items-start gap-3 min-w-0">
+            <AlertTriangle
+              className={`w-4 h-4 mt-0.5 shrink-0 ${
+                isCriticalShortage ? 'text-red-700' : 'text-amber-700'
+              }`}
+            />
+            <div className="text-xs space-y-0.5">
+              <div className="font-semibold">
+                {isCriticalShortage
+                  ? 'Critical Staffing Alert: Zero Physicians Available'
+                  : 'Low Physician Coverage Warning'}
+              </div>
+              <p className={isCriticalShortage ? 'text-red-800' : 'text-amber-800'}>
+                <span className="font-mono tabular-nums font-semibold">
+                  {availableDoctorsCount}
+                </span>{' '}
+                available doctor{availableDoctorsCount === 1 ? '' : 's'} below the minimum threshold of{' '}
+                <span className="font-mono tabular-nums font-semibold">
+                  {requiredAvailableDoctors}
+                </span>{' '}
+                for{' '}
+                <span className="font-mono tabular-nums font-semibold">{activePatientCount}</span>{' '}
+                active patients ({totalWaiting} waiting, {inTreatmentCount} in bay · 1:
+                {PATIENTS_PER_AVAILABLE_DOCTOR_THRESHOLD} target ratio).
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 shrink-0">
+            {firstOffDutyDoctor && (
+              <button
+                type="button"
+                onClick={() => onToggleDoctorStatus(firstOffDutyDoctor.id, 'Available')}
+                className={`px-3 py-1.5 text-xs font-medium rounded-md border transition-colors whitespace-nowrap cursor-pointer ${
+                  isCriticalShortage
+                    ? 'bg-white border-red-300 text-red-800 hover:bg-red-100'
+                    : 'bg-white border-amber-300 text-amber-900 hover:bg-amber-100'
+                }`}
+              >
+                Mark {firstOffDutyDoctor.name} Available
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => setShowAddForm(true)}
+              className={`px-3 py-1.5 text-xs font-medium text-white rounded-md transition-colors whitespace-nowrap cursor-pointer ${
+                isCriticalShortage
+                  ? 'bg-red-700 hover:bg-red-800'
+                  : 'bg-amber-700 hover:bg-amber-800'
+              }`}
+            >
+              Add On-Call Doctor
+            </button>
+          </div>
+        </div>
+      )}
 
       {showAddForm && (
         <form
@@ -167,9 +248,13 @@ export function DoctorsRosterView({
                     <td className="py-4 px-3 align-top">
                       {activePatient ? (
                         <div className="space-y-1">
-                          <div className="flex items-center gap-2">
+                          <div className="flex flex-wrap items-center gap-2">
                             <span className="font-medium text-slate-900">{activePatient.name}</span>
-                            <PriorityText priority={activePatient.priority} />
+                            <PriorityText priority={activePatient.priority} pulseOnCritical />
+                            <PatientStatusText
+                              status={activePatient.status}
+                              isCritical={activePatient.priority === 1}
+                            />
                           </div>
                           <div className="text-xs text-slate-500 font-mono tabular-nums">
                             {activePatient.mrn} ·{' '}
@@ -220,15 +305,17 @@ export function DoctorsRosterView({
                           <>
                             <button
                               type="button"
+                              disabled={busyAction === `complete-${activePatient.id}`}
                               onClick={() => onCompleteTreatment(activePatient.id, 'Discharged')}
-                              className="px-2.5 py-1.5 text-xs font-medium text-emerald-800 bg-emerald-50 border border-emerald-200 hover:bg-emerald-100 rounded-md transition-colors whitespace-nowrap cursor-pointer"
+                              className="px-2.5 py-1.5 text-xs font-medium text-emerald-800 bg-emerald-50 border border-emerald-200 hover:bg-emerald-100 disabled:opacity-40 disabled:cursor-not-allowed rounded-md transition-colors whitespace-nowrap cursor-pointer"
                             >
-                              Discharge
+                              {busyAction === `complete-${activePatient.id}` ? 'Discharging...' : 'Discharge'}
                             </button>
                             <button
                               type="button"
-                              onClick={() => onCompleteTreatment(activePatient.id, 'Transferred')}
-                              className="px-2.5 py-1.5 text-xs font-medium text-slate-700 bg-white border border-slate-200 hover:bg-slate-50 rounded-md transition-colors whitespace-nowrap cursor-pointer"
+                              disabled={busyAction === `transfer-${activePatient.id}`}
+                              onClick={() => onOpenTransferModal(activePatient)}
+                              className="px-2.5 py-1.5 text-xs font-medium text-amber-800 bg-amber-50 border border-amber-200 hover:bg-amber-100 disabled:opacity-40 disabled:cursor-not-allowed rounded-md transition-colors whitespace-nowrap cursor-pointer"
                             >
                               Transfer
                             </button>

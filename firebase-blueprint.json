@@ -1,0 +1,161 @@
+{
+  "entities": {
+    "StaffProfile": {
+      "title": "StaffProfile",
+      "description": "Authenticated Lifebonds staff profile stored at /users/{userId} with strict owner-only isolation.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Firebase Authentication UID matching the document ID.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "description": "Verified staff email address (owner-only private PII).",
+          "minLength": 3,
+          "maxLength": 200
+        },
+        "displayName": {
+          "type": "string",
+          "description": "Display name of the clinical staff member.",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "departmentUnit": {
+          "type": "string",
+          "description": "Assigned clinical unit.",
+          "minLength": 2,
+          "maxLength": 80
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the profile was created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the profile was last updated."
+        }
+      },
+      "required": ["uid", "email", "displayName", "departmentUnit", "createdAt", "updatedAt"]
+    },
+    "ReferralBookmark": {
+      "title": "ReferralBookmark",
+      "description": "Non-PHI outpatient clinic, pharmacy, or diagnostic center bookmark saved from the Campus & Referrals map.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "description": "Firebase UID of the owning staff member.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "facilityId": {
+          "type": "string",
+          "description": "Sanitized identifier for the saved facility.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "name": {
+          "type": "string",
+          "description": "Facility display name.",
+          "minLength": 2,
+          "maxLength": 160
+        },
+        "category": {
+          "type": "string",
+          "enum": ["Pharmacy", "Outpatient Clinic", "Diagnostics", "Blood Bank", "Rehab Center"],
+          "description": "Referral facility category."
+        },
+        "address": {
+          "type": "string",
+          "description": "Formatted street address.",
+          "minLength": 2,
+          "maxLength": 300
+        },
+        "placeUri": {
+          "type": "string",
+          "description": "Google Maps external link for the facility.",
+          "minLength": 8,
+          "maxLength": 500
+        },
+        "notes": {
+          "type": "string",
+          "description": "Operational referral hours or wayfinding notes (no PHI).",
+          "minLength": 0,
+          "maxLength": 400
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["ownerId", "facilityId", "name", "category", "address", "placeUri", "notes", "createdAt", "updatedAt"]
+    },
+    "ShiftNote": {
+      "title": "ShiftNote",
+      "description": "Non-PHI operational shift handoff checklist or DSA triage observation note.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "description": "Firebase UID of the author.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 120
+        },
+        "body": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        },
+        "category": {
+          "type": "string",
+          "enum": ["Shift Handoff", "Surge Protocol", "DSA Observation", "Equipment Check"]
+        },
+        "pinned": {
+          "type": "boolean"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["ownerId", "title", "body", "category", "pinned", "createdAt", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/StaffProfile" },
+      "description": "Private staff profile keyed by Firebase Auth UID. Restricted strictly to the owning verified user."
+    },
+    "/users/{userId}/bookmarks/{facilityId}": {
+      "schema": { "$ref": "#/entities/ReferralBookmark" },
+      "description": "Saved outpatient referral facility bookmarks owned by the staff user."
+    },
+    "/users/{userId}/triageNotes/{noteId}": {
+      "schema": { "$ref": "#/entities/ShiftNote" },
+      "description": "Operational shift checklist notes owned by the staff user."
+    }
+  }
+}
